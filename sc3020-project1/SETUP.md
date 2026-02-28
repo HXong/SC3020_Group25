@@ -31,12 +31,40 @@ docker exec -it sc3020_db psql -U postgres -d sc3020_project1
 \i /01_table_creation.sql
 ```
 ---
-### Option B (if you prefer psql installed locally):
+### Option B (using pgAdmin)
+1) Open pgAdmin in browser using this [localhost](http://localhost:5050)
+- Login:
+    - Email: admin@local.com
+    - Password: admin
+2) Add PostgreSQL Server in pgAdmin
+- Right click `Servers`
+- click Register -> Server
+- General Tab
+    - Name: `SC3020_Project1`
+- Connection Tab
+    - Host: `db`
+    - Port: `5432`
+    - Username: `postgres`
+    - Password: `postgres`
+3) Create Tables using `table-creation.txt`
+- Right click sc3020_project1 (under database) -> Open Query tool
+- Paste the entire contents of table-creation.txt -> Click Execute Script
+- Verify tables created, in pgAdmin expand:
+```
+Databases
+ └── sc3020_project1
+     └── Schemas
+         └── public
+             └── Tables
+```
+- Should see the 8 tables created
+---
+### Option C (if you prefer psql installed locally):
 ```bash
 psql -h localhost -p 5432 -U postgres -d sc3020_project1 -f sql/01_table_creation.sql
 ```
 
-## 3) Import CSV data
+## 3a) Import CSV data (using CLI)
 Import the 8 CSV files using any method you prefer (pgAdmin GUI / COPY / psql \copy).
 
 Each member should download the dataset from NTULearn and import
@@ -73,7 +101,31 @@ Note:
 - Since some of the files are very big, it will take some time. Docker should allocate
 enough memory for this. If unsure, check your docker desktop for memory usage.
 
-## Stop / reset
+## 3b) Import CSV data (using pgAdmin)
+For each table:
+1. Right click table → Import/Export Data
+2. Choose:
+- Format: CSV
+- Filename: select corresponding CSV file
+- Encoding: UTF-8
+- Delimiter: |
+- Header: no
+
+Repeat for each table in the correct order due to FK constraints.
+1. region
+2. nation
+3. supplier
+4. customer
+5. part
+6. partsupp
+7. orders
+8. lineitem
+
+Note:
+- You can verify the imports by running select count for each table
+- Some of the imports could take some time due to large number of rows. 
+
+## 4) Stop / reset
 ### Stop containers:
 ```bash
 docker compose down

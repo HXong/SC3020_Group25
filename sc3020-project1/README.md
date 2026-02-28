@@ -27,7 +27,7 @@ Each member can create their own task-specific SQL/scripts locally or in their o
 - `report/` : report drafts + final PDF
 
 ## Quick start
-Follow `SETUP.md`.
+Follow [setup instructions](SETUP.md).
 
 ## Notes
 - Import the 8 CSV files into the 8 relations after table creation.
