@@ -11,13 +11,13 @@ Each member can create their own task-specific SQL/scripts locally or in their o
 
 ## Group Members
 
-| Name | Matric No | Tasks |
-|------|-----------|---------------|
-| Member 1 | | |
-| Member 2 | | |
-| Member 3 | | |
-| Member 4 | | |
-| Member 5 | | |
+| Name | Tasks |
+|------|---------------|
+| Ong Hong Xun | 10-13 |
+| Clarence Tan Yan Kai | 1-3 |
+| Wong Rong Jing | 14-15 |
+| Chen ZhongJiang | 4-6 |
+| Chan Zi Jian | 7-9 |
 
 ---
 
