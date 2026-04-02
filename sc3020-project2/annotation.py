@@ -2,7 +2,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 
-IGNORED_WRAPPER_NODES = {"Gather", "Hash", "Sort", "Materialize"}
+IGNORED_WRAPPER_NODES = {"Gather", "Hash", "Materialize"}
 
 # Plan Tree Helpers
 def get_meaningful_node(plan: dict) -> dict:
@@ -26,6 +26,8 @@ def traverse_plan(plan: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
         "join_filter": plan.get("Join Filter"),
         "filter": plan.get("Filter"),
         "index_cond": plan.get("Index Cond"),
+        "sort_key": plan.get("Sort Key"),
+        "child_plans": plan.get("Plans", []),
     }
     results.append(node_info)
 
@@ -45,7 +47,6 @@ def normalize_whitespace(text: str) -> str:
 
 def split_sql_clauses(query: str) -> Dict[str, str]:
     query_clean = normalize_whitespace(query.strip().rstrip(";"))
-
     lower_query = query_clean.lower()
 
     from_pos = lower_query.find(" from ")
@@ -57,6 +58,8 @@ def split_sql_clauses(query: str) -> Dict[str, str]:
         "select": "",
         "from": "",
         "where": "",
+        "group_by": "",
+        "order_by": "",
     }
 
     if from_pos == -1:
@@ -67,13 +70,20 @@ def split_sql_clauses(query: str) -> Dict[str, str]:
 
     clause_end_positions = [pos for pos in [where_pos, group_by_pos, order_by_pos] if pos != -1]
     from_end = min(clause_end_positions) if clause_end_positions else len(query_clean)
-
     result["from"] = query_clean[from_pos + len(" from "):from_end].strip()
 
     if where_pos != -1:
         where_end_candidates = [pos for pos in [group_by_pos, order_by_pos] if pos != -1 and pos > where_pos]
         where_end = min(where_end_candidates) if where_end_candidates else len(query_clean)
         result["where"] = query_clean[where_pos + len(" where "):where_end].strip()
+
+    if group_by_pos != -1:
+        group_by_end_candidates = [pos for pos in [order_by_pos] if pos != -1 and pos > group_by_pos]
+        group_by_end = min(group_by_end_candidates) if group_by_end_candidates else len(query_clean)
+        result["group_by"] = query_clean[group_by_pos + len(" group by "):group_by_end].strip()
+
+    if order_by_pos != -1:
+        result["order_by"] = query_clean[order_by_pos + len(" order by "):].strip()
 
     return result
 
@@ -203,6 +213,39 @@ def split_where_conditions(where_clause: str) -> List[Dict[str, Optional[str]]]:
         for cond in conditions if cond
     ]
 
+def split_order_by_items(order_by_clause: str) -> List[Dict[str, Optional[str]]]:
+    if not order_by_clause:
+        return []
+
+    items = [item.strip() for item in order_by_clause.split(",")]
+
+    return [
+        {
+            "raw": item,
+            "annotation": None,
+        }
+        for item in items if item
+    ]
+
+def is_order_satisfied_by_index(
+    order_by_conditions: List[Dict[str, Any]],
+    scans: List[Dict[str, str]]
+) -> bool:
+    """
+    Very simple version:
+    If there is an index scan and ORDER BY exists,
+    assume ordering is satisfied by index.
+    """
+    if not order_by_conditions:
+        return False
+
+    for scan in scans:
+        if "index scan" in scan["message"].lower():
+            return True
+
+    return False
+
+
 def extract_sql_components(query: str) -> Dict[str, Any]:
     clauses = split_sql_clauses(query)
     from_info = parse_from_and_joins(clauses["from"])
@@ -212,6 +255,7 @@ def extract_sql_components(query: str) -> Dict[str, Any]:
         "from_items": from_info["from_items"],
         "join_conditions": from_info["join_conditions"],
         "where_conditions": split_where_conditions(clauses["where"]),
+        "order_by_conditions": split_order_by_items(clauses["order_by"]),
         "raw_query": query.strip(),
     }
 
@@ -290,7 +334,21 @@ def summarize_join_operator(node: Dict[str, Any]) -> Optional[Dict[str, str]]:
     if node_type not in {"Hash Join", "Merge Join", "Nested Loop"}:
         return None
 
-    cond = node.get("hash_cond") or node.get("merge_cond") or node.get("join_filter")
+    cond = (
+        node.get("hash_cond")
+        or node.get("merge_cond")
+        or node.get("join_filter")
+    )
+
+    # Nested Loop often carries the join condition in a child Index Cond
+    if not cond and node_type == "Nested Loop":
+        child_plans = node.get("child_plans", [])
+        for child in child_plans:
+            index_cond = child.get("index_cond")
+            if index_cond:
+                cond = index_cond
+                break
+
     message = f"This join is implemented using {node_type.lower()}."
 
     return {
@@ -353,6 +411,17 @@ def summarize_predicate_usage(node: Dict[str, Any]) -> List[Dict[str, str]]:
 
     return messages
 
+def summarize_sort_operator(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    node_type = node.get("node_type")
+
+    if node_type != "Sort":
+        return None
+
+    return {
+        "sort_keys": node.get("sort_key", []),
+        "message": "The result is sorted using a sort operator."
+    }
+
 
 def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[str, Any]:
     operators = extract_plan_operators(qep)
@@ -360,6 +429,7 @@ def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[
     scans = []
     joins = []
     predicates = []
+    sorts = []
 
     for op in operators:
         scan_info = summarize_scan_operator(op)
@@ -373,12 +443,17 @@ def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[
         predicate_infos = summarize_predicate_usage(op)
         predicates.extend(predicate_infos)
 
+        sort_info = summarize_sort_operator(op)
+        if sort_info:
+            sorts.append(sort_info)
+
     join_comparisons = compare_join_alternatives(qep, aqps)
 
     return {
         "scans": scans,
         "joins": joins,
         "predicates": predicates,
+        "sorts": sorts,
         "join_comparisons": join_comparisons,
         "operators": operators,
     }
@@ -443,18 +518,38 @@ def bind_predicate_annotations(
                 where_item["annotation"] = predicate["message"]
                 break
 
+def bind_sort_annotations(
+    order_by_conditions: List[Dict[str, Any]],
+    sorts: List[Dict[str, Any]],
+    scans: List[Dict[str, str]],
+) -> None:
+    if not order_by_conditions:
+        return
+
+    # Case 1: explicit Sort node exists
+    if sorts:
+        for order_item in order_by_conditions:
+            order_item["annotation"] = sorts[0]["message"]
+        return
+
+    # Case 2: ordering satisfied by index scan
+    if is_order_satisfied_by_index(order_by_conditions, scans):
+        for order_item in order_by_conditions:
+            order_item["annotation"] = (
+                "The ordering is satisfied by scanning an index in order, "
+                "so no explicit sort operator is needed."
+            )
+
 
 def bind_annotations_to_query(sql_components: Dict[str, Any], plan_annotations: Dict[str, Any]) -> Dict[str, Any]:
     bind_scan_annotations(sql_components["from_items"], plan_annotations["scans"])
 
-    # First bind join annotations to explicit JOIN ... ON ...
     bind_join_annotations_to_conditions(
         sql_components["join_conditions"],
         plan_annotations["joins"],
         plan_annotations["join_comparisons"],
     )
 
-    # Next bind to WHERE conditions for comma joins
     bind_join_annotations_to_conditions(
         sql_components["where_conditions"],
         plan_annotations["joins"],
@@ -464,6 +559,12 @@ def bind_annotations_to_query(sql_components: Dict[str, Any], plan_annotations: 
     bind_predicate_annotations(
         sql_components["where_conditions"],
         plan_annotations["predicates"],
+    )
+
+    bind_sort_annotations(
+        sql_components["order_by_conditions"],
+        plan_annotations["sorts"],
+        plan_annotations["scans"],
     )
 
     return sql_components
