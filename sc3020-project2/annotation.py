@@ -26,6 +26,7 @@ def traverse_plan(plan: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
         "join_filter": plan.get("Join Filter"),
         "filter": plan.get("Filter"),
         "index_cond": plan.get("Index Cond"),
+        "recheck_cond": plan.get("Recheck Cond"),
         "sort_key": plan.get("Sort Key"),
         "child_plans": plan.get("Plans", []),
     }
@@ -40,6 +41,24 @@ def extract_plan_operators(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     traverse_plan(plan, results)
     return results
 
+def extract_order_by_column(expr: str) -> str:
+    expr = expr.strip().lower()
+    if "." in expr:
+        expr = expr.split(".")[-1]
+    return expr
+
+def extract_column_from_index_cond(cond: str) -> Optional[str]:
+    if not cond:
+        return None
+
+    cond = cond.strip().strip("()").lower()
+
+    parts = cond.split("=")
+    if len(parts) != 2:
+        return None
+
+    return normalize_identifier(parts[0])
+
 
 # SQL Parsing Helpers
 def normalize_whitespace(text: str) -> str:
@@ -53,6 +72,7 @@ def split_sql_clauses(query: str) -> Dict[str, str]:
     where_pos = lower_query.find(" where ")
     group_by_pos = lower_query.find(" group by ")
     order_by_pos = lower_query.find(" order by ")
+    limit_pos = lower_query.find(" limit ")
 
     result = {
         "select": "",
@@ -60,6 +80,7 @@ def split_sql_clauses(query: str) -> Dict[str, str]:
         "where": "",
         "group_by": "",
         "order_by": "",
+        "limit": "",
     }
 
     if from_pos == -1:
@@ -68,22 +89,39 @@ def split_sql_clauses(query: str) -> Dict[str, str]:
 
     result["select"] = query_clean[:from_pos].strip()
 
-    clause_end_positions = [pos for pos in [where_pos, group_by_pos, order_by_pos] if pos != -1]
+    clause_end_positions = [
+        pos for pos in [where_pos, group_by_pos, order_by_pos, limit_pos]
+        if pos != -1
+    ]
     from_end = min(clause_end_positions) if clause_end_positions else len(query_clean)
     result["from"] = query_clean[from_pos + len(" from "):from_end].strip()
 
     if where_pos != -1:
-        where_end_candidates = [pos for pos in [group_by_pos, order_by_pos] if pos != -1 and pos > where_pos]
+        where_end_candidates = [
+            pos for pos in [group_by_pos, order_by_pos, limit_pos]
+            if pos != -1 and pos > where_pos
+        ]
         where_end = min(where_end_candidates) if where_end_candidates else len(query_clean)
         result["where"] = query_clean[where_pos + len(" where "):where_end].strip()
 
     if group_by_pos != -1:
-        group_by_end_candidates = [pos for pos in [order_by_pos] if pos != -1 and pos > group_by_pos]
+        group_by_end_candidates = [
+            pos for pos in [order_by_pos, limit_pos]
+            if pos != -1 and pos > group_by_pos
+        ]
         group_by_end = min(group_by_end_candidates) if group_by_end_candidates else len(query_clean)
         result["group_by"] = query_clean[group_by_pos + len(" group by "):group_by_end].strip()
 
     if order_by_pos != -1:
-        result["order_by"] = query_clean[order_by_pos + len(" order by "):].strip()
+        order_by_end_candidates = [
+            pos for pos in [limit_pos]
+            if pos != -1 and pos > order_by_pos
+        ]
+        order_by_end = min(order_by_end_candidates) if order_by_end_candidates else len(query_clean)
+        result["order_by"] = query_clean[order_by_pos + len(" order by "):order_by_end].strip()
+
+    if limit_pos != -1:
+        result["limit"] = query_clean[limit_pos + len(" limit "):].strip()
 
     return result
 
@@ -198,20 +236,63 @@ def parse_from_and_joins(from_clause: str) -> Dict[str, Any]:
         "join_conditions": join_conditions,
     }
 
+def protect_between_and(where_clause: str) -> str:
+
+    pattern = re.compile(
+        r"\bbetween\b\s+.+?\s+\band\b\s+.+?(?=\s+\band\b\s+|$)",
+        flags=re.IGNORECASE
+    )
+
+    protected = where_clause
+    counter = 0
+
+    while True:
+        match = pattern.search(protected)
+        if not match:
+            break
+
+        full_text = match.group(0)
+        placeholder = f"__BETWEEN_AND_{counter}__"
+        counter += 1
+
+        replacement = re.sub(
+            r"\band\b",
+            placeholder,
+            full_text,
+            count=1,
+            flags=re.IGNORECASE
+        )
+
+        protected = protected[:match.start()] + replacement + protected[match.end():]
+
+    return protected
+
+
+def restore_between_and(condition: str) -> str:
+    return re.sub(r"__BETWEEN_AND_\d+__", "AND", condition)
+
+
 def split_where_conditions(where_clause: str) -> List[Dict[str, Optional[str]]]:
     if not where_clause:
         return []
 
-    # split on AND
-    conditions = [cond.strip() for cond in re.split(r"\band\b", where_clause, flags=re.IGNORECASE)]
+    protected = protect_between_and(where_clause)
 
-    return [
-        {
-            "raw": cond,
-            "annotation": None,
-        }
-        for cond in conditions if cond
+    conditions = [
+        cond.strip()
+        for cond in re.split(r"\band\b", protected, flags=re.IGNORECASE)
     ]
+
+    restored_conditions = []
+    for cond in conditions:
+        cond = restore_between_and(cond)
+        if cond:
+            restored_conditions.append({
+                "raw": cond.strip(),
+                "annotation": None,
+            })
+
+    return restored_conditions
 
 def split_order_by_items(order_by_clause: str) -> List[Dict[str, Optional[str]]]:
     if not order_by_clause:
@@ -227,23 +308,19 @@ def split_order_by_items(order_by_clause: str) -> List[Dict[str, Optional[str]]]
         for item in items if item
     ]
 
-def is_order_satisfied_by_index(
-    order_by_conditions: List[Dict[str, Any]],
-    scans: List[Dict[str, str]]
-) -> bool:
-    """
-    Very simple version:
-    If there is an index scan and ORDER BY exists,
-    assume ordering is satisfied by index.
-    """
-    if not order_by_conditions:
-        return False
+def split_group_by_items(group_by_clause: str) -> List[Dict[str, Optional[str]]]:
+    if not group_by_clause:
+        return []
 
-    for scan in scans:
-        if "index scan" in scan["message"].lower():
-            return True
+    items = [item.strip() for item in group_by_clause.split(",")]
 
-    return False
+    return [
+        {
+            "raw": item,
+            "annotation": None,
+        }
+        for item in items if item
+    ]
 
 
 def extract_sql_components(query: str) -> Dict[str, Any]:
@@ -255,24 +332,48 @@ def extract_sql_components(query: str) -> Dict[str, Any]:
         "from_items": from_info["from_items"],
         "join_conditions": from_info["join_conditions"],
         "where_conditions": split_where_conditions(clauses["where"]),
+        "group_by_conditions": split_group_by_items(clauses["group_by"]),
         "order_by_conditions": split_order_by_items(clauses["order_by"]),
+        "limit_clause": clauses["limit"],
         "raw_query": query.strip(),
     }
 
 
 # Condition Normalisation Helpers
 def normalize_identifier(identifier: str) -> str:
-    return identifier.strip().strip("()").lower()
+    identifier = identifier.strip().strip("()").lower()
+    if "." in identifier:
+        identifier = identifier.split(".")[-1]
+    return identifier
 
+
+def canonicalize_between_condition(condition: str) -> Optional[str]:
+    """
+    Normalize BETWEEN predicates.
+    Example:
+      l_shipdate BETWEEN '1994-01-01' AND '1994-12-31'
+    """
+    if not condition:
+        return None
+
+    cleaned = condition.strip().strip("()").lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    match = re.fullmatch(
+        r"(.+?)\s+between\s+(.+?)\s+and\s+(.+)",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+    if not match:
+        return None
+
+    left = normalize_identifier(match.group(1))
+    low = match.group(2).strip()
+    high = match.group(3).strip()
+
+    return f"{left} between {low} and {high}"
 
 def canonicalize_equality_condition(condition: str) -> Optional[str]:
-    """
-    Convert equality predicates like:
-    C.c_custkey = O.o_custkey
-    (o.o_custkey = c.c_custkey)
-
-    into a canonical order-independent string.
-    """
     if not condition or "=" not in condition:
         return None
 
@@ -285,8 +386,32 @@ def canonicalize_equality_condition(condition: str) -> Optional[str]:
     left = normalize_identifier(parts[0])
     right = normalize_identifier(parts[1])
 
-    ordered = sorted([left, right])
-    return f"{ordered[0]} = {ordered[1]}"
+    return " = ".join(sorted([left, right]))
+
+def canonicalize_generic_condition(condition: str) -> Optional[str]:
+    """
+    Normalize general predicates such as:
+      c_acctbal > 1000
+      o_orderdate <= '1995-01-01'
+    """
+    if not condition:
+        return None
+
+    cleaned = condition.strip().strip("()").lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    match = re.fullmatch(r"(.+?)\s*(>=|<=|!=|=|>|<)\s*(.+)", cleaned)
+    if not match:
+        return None
+
+    left = normalize_identifier(match.group(1))
+    op = match.group(2)
+    right = match.group(3).strip()
+
+    if is_identifier_like(right):
+        right = normalize_identifier(right)
+
+    return f"{left} {op} {right}"
 
 def canonicalize_condition(condition: str) -> str:
     """
@@ -299,6 +424,37 @@ def canonicalize_condition(condition: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned
 
+def is_identifier_like(expr: str) -> bool:
+    """
+    Returns True if the expression looks like a column reference,
+    e.g. c.c_custkey or c_custkey
+    """
+    expr = expr.strip().strip("()").lower()
+
+    # basic identifier / qualified identifier
+    return bool(re.fullmatch(r"[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?", expr))
+
+def is_join_like_condition(condition: str) -> bool:
+    """
+    Returns True if the condition looks like an equality join between two identifiers.
+    Example:
+      c.c_custkey = o.o_custkey   -> True
+      c_custkey = o.o_custkey     -> True
+      o_orderkey = 1              -> False
+    """
+    if not condition or "=" not in condition:
+        return False
+
+    cleaned = condition.strip().strip("()")
+    parts = cleaned.split("=")
+
+    if len(parts) != 2:
+        return False
+
+    left = parts[0].strip()
+    right = parts[1].strip()
+
+    return is_identifier_like(left) and is_identifier_like(right)
 
 # Plan Semantic Analysis Helpers
 def summarize_scan_operator(node: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -340,13 +496,12 @@ def summarize_join_operator(node: Dict[str, Any]) -> Optional[Dict[str, str]]:
         or node.get("join_filter")
     )
 
-    # Nested Loop often carries the join condition in a child Index Cond
+    # Nested Loop fallback: infer join condition from child index conditions
     if not cond and node_type == "Nested Loop":
-        child_plans = node.get("child_plans", [])
-        for child in child_plans:
-            index_cond = child.get("index_cond")
-            if index_cond:
-                cond = index_cond
+        for child in node.get("child_plans", []):
+            child_index_cond = child.get("Index Cond")
+            if child_index_cond and is_join_like_condition(child_index_cond):
+                cond = child_index_cond
                 break
 
     message = f"This join is implemented using {node_type.lower()}."
@@ -395,15 +550,22 @@ def summarize_predicate_usage(node: Dict[str, Any]) -> List[Dict[str, str]]:
     messages = []
 
     index_cond = node.get("index_cond")
+    recheck_cond = node.get("recheck_cond")
     filter_cond = node.get("filter")
 
-    if index_cond:
+    if index_cond and not is_join_like_condition(index_cond):
         messages.append({
             "condition": index_cond,
             "message": "This predicate is used as an index condition during execution."
         })
 
-    if filter_cond:
+    if recheck_cond and not is_join_like_condition(recheck_cond):
+        messages.append({
+            "condition": recheck_cond,
+            "message": "This predicate is rechecked after index-based access."
+        })
+
+    if filter_cond and not is_join_like_condition(filter_cond):
         messages.append({
             "condition": filter_cond,
             "message": "This predicate is applied as a filter during execution."
@@ -422,6 +584,35 @@ def summarize_sort_operator(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "message": "The result is sorted using a sort operator."
     }
 
+def is_order_satisfied_by_index(
+    order_by_conditions: List[Dict[str, Any]],
+    operators: List[Dict[str, Any]],
+) -> bool:
+    if not order_by_conditions:
+        return False
+
+    order_cols = [extract_order_by_column(item["raw"]) for item in order_by_conditions]
+
+    for op in operators:
+        if op.get("node_type") == "Index Scan":
+            index_cond = op.get("index_cond")
+            index_col = extract_column_from_index_cond(index_cond)
+
+            if index_col and index_col in order_cols:
+                return True
+
+    return False
+
+def summarize_aggregate_operator(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    node_type = node.get("node_type")
+
+    if node_type not in {"Aggregate", "GroupAggregate", "HashAggregate"}:
+        return None
+
+    return {
+        "node_type": node_type,
+        "message": "Grouping is performed using an aggregate operator."
+    }
 
 def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[str, Any]:
     operators = extract_plan_operators(qep)
@@ -430,6 +621,7 @@ def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[
     joins = []
     predicates = []
     sorts = []
+    aggregates = []
 
     for op in operators:
         scan_info = summarize_scan_operator(op)
@@ -447,6 +639,10 @@ def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[
         if sort_info:
             sorts.append(sort_info)
 
+        aggregate_info = summarize_aggregate_operator(op)
+        if aggregate_info:
+            aggregates.append(aggregate_info)
+
     join_comparisons = compare_join_alternatives(qep, aqps)
 
     return {
@@ -454,6 +650,7 @@ def extract_plan_annotations(qep: Dict[str, Any], aqps: Dict[str, Any]) -> Dict[
         "joins": joins,
         "predicates": predicates,
         "sorts": sorts,
+        "aggregates": aggregates,
         "join_comparisons": join_comparisons,
         "operators": operators,
     }
@@ -500,28 +697,36 @@ def bind_predicate_annotations(
     where_conditions: List[Dict[str, Any]],
     predicates: List[Dict[str, str]],
 ) -> None:
-    for where_item in where_conditions:
-        if where_item.get("annotation"):
-            continue
+    for condition_item in where_conditions:
+        raw = condition_item["raw"]
 
-        raw = where_item["raw"]
-        canonical_sql = canonicalize_condition(raw)
+        canonical_sql_eq = canonicalize_equality_condition(raw)
+        canonical_sql_generic = canonicalize_generic_condition(raw)
+        canonical_sql_between = canonicalize_between_condition(raw)
 
-        for predicate in predicates:
-            plan_cond = predicate.get("condition")
+        for pred in predicates:
+            plan_cond = pred.get("condition")
             if not plan_cond:
                 continue
 
-            canonical_plan = canonicalize_condition(plan_cond)
+            canonical_plan_eq = canonicalize_equality_condition(plan_cond)
+            canonical_plan_generic = canonicalize_generic_condition(plan_cond)
+            canonical_plan_between = canonicalize_between_condition(plan_cond)
 
-            if canonical_plan == canonical_sql:
-                where_item["annotation"] = predicate["message"]
+            if (
+                canonical_sql_eq and canonical_plan_eq and canonical_sql_eq == canonical_plan_eq
+            ) or (
+                canonical_sql_generic and canonical_plan_generic and canonical_sql_generic == canonical_plan_generic
+            ) or (
+                canonical_sql_between and canonical_plan_between and canonical_sql_between == canonical_plan_between
+            ):
+                condition_item["annotation"] = pred["message"]
                 break
 
 def bind_sort_annotations(
     order_by_conditions: List[Dict[str, Any]],
     sorts: List[Dict[str, Any]],
-    scans: List[Dict[str, str]],
+    operators: List[Dict[str, Any]],
 ) -> None:
     if not order_by_conditions:
         return
@@ -533,12 +738,22 @@ def bind_sort_annotations(
         return
 
     # Case 2: ordering satisfied by index scan
-    if is_order_satisfied_by_index(order_by_conditions, scans):
+    if is_order_satisfied_by_index(order_by_conditions, operators):
         for order_item in order_by_conditions:
             order_item["annotation"] = (
                 "The ordering is satisfied by scanning an index in order, "
                 "so no explicit sort operator is needed."
             )
+
+def bind_group_by_annotations(
+    group_by_conditions: List[Dict[str, Any]],
+    aggregates: List[Dict[str, Any]],
+) -> None:
+    if not group_by_conditions or not aggregates:
+        return
+
+    for group_item in group_by_conditions:
+        group_item["annotation"] = aggregates[0]["message"]
 
 
 def bind_annotations_to_query(sql_components: Dict[str, Any], plan_annotations: Dict[str, Any]) -> Dict[str, Any]:
@@ -561,10 +776,15 @@ def bind_annotations_to_query(sql_components: Dict[str, Any], plan_annotations: 
         plan_annotations["predicates"],
     )
 
+    bind_group_by_annotations(
+        sql_components["group_by_conditions"],
+        plan_annotations["aggregates"],
+    )
+
     bind_sort_annotations(
         sql_components["order_by_conditions"],
         plan_annotations["sorts"],
-        plan_annotations["scans"],
+        plan_annotations["operators"],
     )
 
     return sql_components

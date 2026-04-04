@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from typing import Optional
 import json
 
 from preprocessing import setup_csv, get_qep, get_aqp_variants
@@ -38,6 +39,23 @@ def process_query(query: str) -> dict:
             "plan_annotations": None,
             "error": str(e),
         }
+    
+def emit_output(data: dict, output_file: Optional[str], append: bool = False) -> None:
+    if output_file:
+        path = Path(output_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if append:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(data))
+                f.write("\n")
+            print(f"Output appended to {path}")
+        else:
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print(f"Output written to {path}")
+    else:
+        print(json.dumps(data, indent=2))
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SC3020 Project 2")
@@ -72,6 +90,18 @@ def main() -> None:
         help="Generate annotations for a query and print the result"
     )
 
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        help="Write output JSON to a file instead of printing to terminal"
+    )
+
+    parser.add_argument(
+        "--append-output",
+        action="store_true",
+        help="Append output to the specified file instead of overwriting it"
+    )
+
     args = parser.parse_args()
 
     if args.setup_csv:
@@ -80,17 +110,17 @@ def main() -> None:
     
     if args.test_query:
         qep = get_qep(args.test_query)
-        print(json.dumps(qep, indent=2))
+        emit_output(qep, args.output_file, args.append_output)
         return
 
     if args.test_aqp:
         aqps = get_aqp_variants(args.test_aqp)
-        print(json.dumps(aqps, indent=2))
+        emit_output(aqps, args.output_file, args.append_output)
         return
     
     if args.test_annotation:
         result = process_query(args.test_annotation)
-        print(json.dumps(result, indent=2))
+        emit_output(result, args.output_file, args.append_output)
         return
 
     launch_app(process_query)
