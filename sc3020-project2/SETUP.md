@@ -5,8 +5,71 @@ This setup avoids installing PostgreSQL locally.
 ## Prerequisites
 
 - Docker Desktop installed and running
+- Python 3.10+
 
-## 1) Start PostgreSQL
+## 1) Download and Generate TPC-H Data
+
+Download from NTULearn (provided zip).
+
+Extract it into project (follow the same instructions as per the project description)
+
+### 1.1) Configure makefile.suite
+
+Open `tpch/dbgen/makefile.suite`
+
+Modify:
+```Bash
+DATABASE = POSTGRESQL
+MACHINE = LINUX
+WORKLOAD = TPCH
+CC = gcc
+```
+
+### 1.2) Compile dbgen
+
+```Bash
+cd tpch/dbgen
+make -f makefile.suite
+```
+
+Some versions of the TPC-H dbgen source contain legacy compiler macros that may fail under gcc. If build errors such as invalid uI64 suffixes appear, update the relevant integer definitions in config.h to long long int / ull / %lld equivalents before recompiling.
+
+### 1.3) Generate Data
+
+run `./dbgen -s 1` will generate all *.tbl files
+
+### 1.4) Move data into project
+
+Move all .tbl files into: "/data" located in our git project (sc3020-project2/data)
+
+## 2) Setup Python Env
+
+From project root: `python -m venv venv`
+
+Activate:
+
+- Windows: `venv\Scripts\activate`
+
+- Mac/Linux: `source venv/bin/activate`
+
+Install Dependencies:
+`pip install -r requirements.txt`
+
+## 3) Prepare Dataset 
+
+Convert .tbl -> .csv and clean trailing pipes:
+```bash
+python project.py --setup-csv
+```
+
+This will:
+- rename .tbl → .csv
+- remove trailing |
+- Optionally remove .tbl files if `python project.py --setup-csv --delete-tbl`
+
+
+
+## 4) Start PostgreSQL
 
 From repo root:
 
@@ -20,9 +83,9 @@ PostgreSQL will be available at:
 - Port: 5432
 - User: postgres
 - Password: postgres
-- Database: sc3020_project2_db
+- Database: TPC-H
 
-## 2) Create tables
+## 5) Create tables
 
 ### Option A (recommanded, using container psql):
 
@@ -57,13 +120,13 @@ docker exec -it sc3020_project2_db psql -U postgres -d TPC-H
 - Connection Tab
   - Host: `db`
   - Port: `5432`
-  - Username: `postgres`
-  - Password: `postgres`
+  - Username: `admin`
+  - Password: `admin`
 
-3. Create Tables using `table-creation.txt`
+3. Create Tables using `01_table_creation.sql`
 
 - Right click TPC-H (under database) -> Open Query tool
-- Paste the entire contents of table-creation.txt -> Click Execute Script
+- Paste the entire contents of 01_table_creation.sql -> Click Execute Script
 - Verify tables created, in pgAdmin expand:
 
 ```
@@ -84,7 +147,7 @@ Databases
 psql -h localhost -p 5432 -U postgres -d sc3020_project1 -f sql/01_table_creation.sql
 ```
 
-## 3a) Import CSV data (using CLI)
+## 6a) Import CSV data (using CLI)
 
 Import the 8 CSV files using any method you prefer (pgAdmin GUI / COPY / psql \copy).
 
@@ -127,7 +190,7 @@ Note:
 - Since some of the files are very big, it will take some time. Docker should allocate
   enough memory for this. If unsure, check your docker desktop for memory usage.
 
-## 3b) Import CSV data (using pgAdmin)
+## 6b) Import CSV data (using pgAdmin)
 
 For each table:
 
@@ -156,7 +219,7 @@ Note:
 - You can verify the imports by running select count for each table
 - Some of the imports could take some time due to large number of rows.
 
-## 4) Stop / reset
+## 7) Stop / reset
 
 ### Stop containers:
 
