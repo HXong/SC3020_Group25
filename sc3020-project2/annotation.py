@@ -347,6 +347,36 @@ def normalize_identifier(identifier: str) -> str:
     return identifier
 
 
+def normalize_literal(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"::[a-zA-Z_]+", "", value)
+
+    # strip one pair of surrounding quotes for simple literals
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        value = value[1:-1]
+
+    return value.lower()
+
+
+def canonicalize_and_condition(condition: str) -> Optional[str]:
+    if not condition:
+        return None
+
+    cleaned = condition.strip().strip("()").lower()
+    cleaned = re.sub(r"::[a-zA-Z_]+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    parts = re.split(r"\band\b", cleaned)
+
+    normalized_parts = []
+    for part in parts:
+        part = part.strip()
+        norm = canonicalize_generic_condition(part)
+        if norm:
+            normalized_parts.append(norm)
+
+    return " AND ".join(sorted(normalized_parts)) if normalized_parts else None
+
 def canonicalize_between_condition(condition: str) -> Optional[str]:
     """
     Normalize BETWEEN predicates.
@@ -388,6 +418,30 @@ def canonicalize_equality_condition(condition: str) -> Optional[str]:
 
     return " = ".join(sorted([left, right]))
 
+def canonicalize_like_condition(condition: str) -> Optional[str]:
+    if not condition:
+        return None
+
+    cleaned = condition.strip().strip("()").lower()
+    cleaned = re.sub(r"::[a-zA-Z_]+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    match = re.fullmatch(r"(.+?)\s+(like|ilike|~~|~~\*)\s+(.+)", cleaned)
+    if not match:
+        return None
+
+    left = normalize_identifier(match.group(1))
+    op = match.group(2)
+    right = normalize_literal(match.group(3))
+
+    # normalize postgres internal operators
+    if op == "~~":
+        op = "like"
+    elif op == "~~*":
+        op = "ilike"
+
+    return f"{left} {op} {right}"
+
 def canonicalize_generic_condition(condition: str) -> Optional[str]:
     """
     Normalize general predicates such as:
@@ -398,6 +452,7 @@ def canonicalize_generic_condition(condition: str) -> Optional[str]:
         return None
 
     cleaned = condition.strip().strip("()").lower()
+    cleaned = re.sub(r"::[a-zA-Z_]+", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
 
     match = re.fullmatch(r"(.+?)\s*(>=|<=|!=|=|>|<)\s*(.+)", cleaned)
@@ -410,6 +465,8 @@ def canonicalize_generic_condition(condition: str) -> Optional[str]:
 
     if is_identifier_like(right):
         right = normalize_identifier(right)
+    else:
+        right = normalize_literal(right)
 
     return f"{left} {op} {right}"
 
@@ -455,6 +512,29 @@ def is_join_like_condition(condition: str) -> bool:
     right = parts[1].strip()
 
     return is_identifier_like(left) and is_identifier_like(right)
+
+def expand_between_to_range(condition: str) -> Optional[str]:
+    """
+    Convert BETWEEN into equivalent range condition.
+    """
+    if not condition:
+        return None
+
+    cleaned = condition.strip().strip("()").lower()
+
+    match = re.fullmatch(
+        r"(.+?)\s+between\s+(.+?)\s+and\s+(.+)",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+    if not match:
+        return None
+
+    col = normalize_identifier(match.group(1))
+    low = match.group(2).strip()
+    high = match.group(3).strip()
+
+    return f"({col} >= {low}) and ({col} <= {high})"
 
 # Plan Semantic Analysis Helpers
 def summarize_scan_operator(node: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -679,6 +759,9 @@ def bind_join_annotations_to_conditions(
         raw = condition_item["raw"]
         canonical_sql = canonicalize_equality_condition(raw)
 
+        if "select" in raw.lower():
+            continue #skip subqueries
+
         if not canonical_sql:
             continue
 
@@ -702,7 +785,9 @@ def bind_predicate_annotations(
 
         canonical_sql_eq = canonicalize_equality_condition(raw)
         canonical_sql_generic = canonicalize_generic_condition(raw)
-        canonical_sql_between = canonicalize_between_condition(raw)
+        canonical_sql_between_range = expand_between_to_range(raw)
+        canonical_sql_between_norm = canonicalize_and_condition(canonical_sql_between_range)
+        canonical_sql_like = canonicalize_like_condition(raw)
 
         for pred in predicates:
             plan_cond = pred.get("condition")
@@ -711,14 +796,17 @@ def bind_predicate_annotations(
 
             canonical_plan_eq = canonicalize_equality_condition(plan_cond)
             canonical_plan_generic = canonicalize_generic_condition(plan_cond)
-            canonical_plan_between = canonicalize_between_condition(plan_cond)
+            canonical_plan_and = canonicalize_and_condition(plan_cond)
+            canonical_plan_like = canonicalize_like_condition(plan_cond)
 
             if (
                 canonical_sql_eq and canonical_plan_eq and canonical_sql_eq == canonical_plan_eq
             ) or (
                 canonical_sql_generic and canonical_plan_generic and canonical_sql_generic == canonical_plan_generic
             ) or (
-                canonical_sql_between and canonical_plan_between and canonical_sql_between == canonical_plan_between
+                canonical_sql_between_norm and canonical_plan_and and canonical_sql_between_norm == canonical_plan_and
+            ) or (
+                canonical_sql_like and canonical_plan_like and canonical_sql_like == canonical_plan_like
             ):
                 condition_item["annotation"] = pred["message"]
                 break
