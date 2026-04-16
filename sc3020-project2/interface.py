@@ -39,7 +39,6 @@ def draw_plan(frame, graph):
     if graph.number_of_nodes() == 0:
         tk.Label(frame, text="No plan to show").pack()
         return
-    
   
     fig, ax = plt.subplots(figsize=(7, 5))
     
@@ -63,6 +62,7 @@ class QueryApp:
         self.root = root
         self.process_fn = process_fn
         self.current_plan = None
+        self.example_listbox = None  
         
         self.root.title("SC3020 - SQL Query Annotator")
         self.root.geometry("1100x650")
@@ -74,7 +74,6 @@ class QueryApp:
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
     
     def create_left_panel(self):
-        """Left side - query input and annotations"""
         left = tk.Frame(self.root, padx=10, pady=10)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
@@ -88,20 +87,18 @@ class QueryApp:
         tk.Button(btn_frame, text="Load Example", command=self.load_example).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="Clear", command=self.clear_all).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="Run", command=self.run_query, bg="lightgreen").pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="Refresh Graph", command=self.refresh_graph).pack(side=tk.RIGHT, padx=2)
         
         tk.Label(left, text="Annotations:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10,0))
         self.ann_box = scrolledtext.ScrolledText(left, height=8, font=("Courier", 9))
         self.ann_box.pack(fill=tk.BOTH, expand=True, pady=5)
     
     def create_right_panel(self):
-        """Right side - graph visualization"""
         right = tk.Frame(self.root, padx=10, pady=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
         tk.Label(right, text="Query Plan Graph:", font=("Arial", 10, "bold")).pack()
-        
-        tk.Button(right, text="Refresh Graph", command=self.refresh_graph).pack(pady=5)
-        
+      
         self.graph_area = tk.Frame(right, bg="white")
         self.graph_area.pack(fill=tk.BOTH, expand=True)
         
@@ -109,14 +106,81 @@ class QueryApp:
                 bg="white").pack(expand=True)
     
     def load_example(self):
-        example = """
-SELECT * 
-FROM customer C, orders O 
-WHERE C.c_custkey = O.o_custkey 
-LIMIT 10;"""
-        self.query_box.delete(1.0, tk.END)
-        self.query_box.insert(1.0, example)
-        self.status.config(text="Example loaded")
+
+        popup = tk.Toplevel(self.root)
+        popup.title("Select Example Query")
+        popup.geometry("700x500")
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        popup.update_idletasks()
+        x = (popup.winfo_screenwidth() // 2) - (700 // 2)
+        y = (popup.winfo_screenheight() // 2) - (500 // 2)
+        popup.geometry(f"700x500+{x}+{y}")
+        
+        tk.Label(popup, text="Select an example query:", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        frame = tk.Frame(popup)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        scrollbar = tk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.example_listbox = tk.Listbox(frame, font=("Courier", 9), 
+                                          yscrollcommand=scrollbar.set)
+        self.example_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.example_listbox.yview)
+        
+        self.examples = [
+            ("Simple Join", 
+             "SELECT * \nFROM customer C, orders O \nWHERE C.c_custkey = O.o_custkey \nLIMIT 10;"),
+            
+            ("Index Scan (Point Query)", 
+             "SELECT * \nFROM customer \nWHERE c_custkey = 1;"),
+            
+            ("Filter with Condition", 
+             "SELECT * \nFROM customer \nWHERE c_acctbal > 5000 \nLIMIT 20;"),
+            
+            ("Order By", 
+             "SELECT c_custkey, c_name, c_acctbal \nFROM customer \nORDER BY c_acctbal DESC \nLIMIT 10;"),
+            
+            ("Three-way Join", 
+             "SELECT C.c_name, O.o_orderdate, L.l_extendedprice\nFROM customer C, orders O, lineitem L\nWHERE C.c_custkey = O.o_custkey \n  AND O.o_orderkey = L.l_orderkey\nLIMIT 100;"),
+            
+            ("Group By", 
+             "SELECT l_returnflag, l_linestatus, SUM(l_quantity) as total_qty\nFROM lineitem\nWHERE l_shipdate < '1998-09-02'\nGROUP BY l_returnflag, l_linestatus;"),
+            
+            ("Between Condition", 
+             "SELECT * \nFROM lineitem \nWHERE l_shipdate BETWEEN '1994-01-01' AND '1994-12-31'\nLIMIT 50;"),
+        ]
+        
+        for i, (name, sql) in enumerate(self.examples):
+            self.example_listbox.insert(tk.END, f"{i+1}. {name}")
+        
+        btn_frame = tk.Frame(popup)
+        btn_frame.pack(fill=tk.X, pady=10)
+        
+        def select_example():
+            selected = self.example_listbox.curselection()
+            if selected:
+                idx = selected[0]
+                name, sql = self.examples[idx]
+                self.query_box.delete(1.0, tk.END)
+                self.query_box.insert(1.0, sql)
+                self.status.config(text=f"Loaded: {name}")
+                popup.destroy()
+            else:
+                messagebox.showwarning("No Selection", "Please select an example first")
+        
+        def double_click(event):
+            select_example()
+        
+        self.example_listbox.bind("<Double-Button-1>", double_click)
+        
+        tk.Button(btn_frame, text="Select", command=select_example, 
+                 bg="lightgreen", width=15).pack(pady=10)
+   
+
     
     def clear_all(self):
         self.query_box.delete(1.0, tk.END)
@@ -211,5 +275,3 @@ def launch_app(process_fn):
     root = tk.Tk()
     app = QueryApp(root, process_fn)
     root.mainloop()
-
-
