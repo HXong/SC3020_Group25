@@ -274,4 +274,5 @@ def launch_app(process_fn):
     print("Starting SQL Query Annotator...")
     root = tk.Tk()
     app = QueryApp(root, process_fn)
+    root.protocol("WM_DELETE_WINDOW", lambda: (root.quit(), root.destroy()))
     root.mainloop()
