@@ -5,29 +5,69 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
+def hierarchy_pos(G, root=None, width=1.0, vert_gap=0.2, vert_loc=0):
+    if root is None:
+        roots = [n for n, d in G.in_degree() if d == 0]
+        root = roots[0] if roots else list(G.nodes)[0]
+
+    def _hierarchy_pos(g, node, left, right, vert_loc_, pos):
+        pos[node] = ((left + right) / 2, vert_loc_)
+        children = list(g.successors(node))
+        if not children:
+            return pos
+
+        dx = (right - left) / max(len(children), 1)
+        next_left = left
+        for child in children:
+            next_right = next_left + dx
+            pos = _hierarchy_pos(g, child, next_left, next_right, vert_loc_ - vert_gap, pos)
+            next_left = next_right
+        return pos
+
+    return _hierarchy_pos(G, root, 0, width, vert_loc, {})
+
+
 def build_graph(plan, graph=None, parent=None, counter=0):
     if graph is None:
         graph = nx.DiGraph()
-    
+
     node_type = plan.get('Node Type', 'Unknown')
     table = plan.get('Relation Name', '')
     cost = plan.get('Total Cost', '?')
-    
+    hash_cond = plan.get('Hash Cond')
+    merge_cond = plan.get('Merge Cond')
+    filter_cond = plan.get('Filter')
+    index_cond = plan.get('Index Cond')
+
+    extra = None
+    if hash_cond:
+        extra = f"Hash: {hash_cond}"
+    elif merge_cond:
+        extra = f"Merge: {merge_cond}"
+    elif index_cond:
+        extra = f"IndexCond: {index_cond}"
+    elif filter_cond:
+        extra = f"Filter: {filter_cond}"
+
     if table:
         label = f"{node_type}\n{table}\nCost: {cost}"
     else:
         label = f"{node_type}\nCost: {cost}"
-    
+
+    if extra:
+        if len(extra) > 40:
+            extra = extra[:40] + "..."
+        label += f"\n{extra}"
+
     graph.add_node(counter, label=label)
-    
+
     if parent is not None:
         graph.add_edge(parent, counter)
-    
+
     next_id = counter + 1
-    if 'Plans' in plan:
-        for child in plan['Plans']:
-            graph, next_id = build_graph(child, graph, counter, next_id)
-    
+    for child in plan.get('Plans', []):
+        graph, next_id = build_graph(child, graph, counter, next_id)
+
     return graph, next_id
 
 
@@ -40,21 +80,32 @@ def draw_plan(frame, graph):
         tk.Label(frame, text="No plan to show").pack()
         return
   
-    fig, ax = plt.subplots(figsize=(7, 5))
-    
+    num_nodes = max(len(graph.nodes), 1)
+    fig_width = max(10, num_nodes * 1.2)
+    fig_height = max(6, num_nodes * 0.9)
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
     labels = nx.get_node_attributes(graph, "label")
-    
-    pos = nx.spring_layout(graph)
-    
-    nx.draw(graph, pos, labels=labels, with_labels=True,
-            node_size=2500, node_color="lightblue",
-            font_size=7, ax=ax)
-    
+    pos = hierarchy_pos(graph, width=max(2.5, len(graph.nodes) * 0.5))
+
+    nx.draw(
+        graph,
+        pos,
+        labels=labels,
+        with_labels=True,
+        node_size=2800,
+        node_color="lightblue",
+        font_size=8,
+        ax=ax
+    )
+
     ax.set_title("Query Execution Plan")
-    
+    ax.axis("off")
+
     canvas = FigureCanvasTkAgg(fig, master=frame)
     canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+    canvas.get_tk_widget().pack(anchor="nw")
 
 
 class QueryApp:
@@ -96,14 +147,52 @@ class QueryApp:
     def create_right_panel(self):
         right = tk.Frame(self.root, padx=10, pady=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-        
+
         tk.Label(right, text="Query Plan Graph:", font=("Arial", 10, "bold")).pack()
-      
-        self.graph_area = tk.Frame(right, bg="white")
-        self.graph_area.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(self.graph_area, text="Run a query to see the plan", 
-                bg="white").pack(expand=True)
+
+        self.graph_container = tk.Frame(right)
+        self.graph_container.pack(fill=tk.BOTH, expand=True)
+
+        self.graph_container.grid_rowconfigure(0, weight=1)
+        self.graph_container.grid_columnconfigure(0, weight=1)
+
+        self.graph_canvas = tk.Canvas(self.graph_container, highlightthickness=0, bg="white")
+
+        self.graph_scroll_y = tk.Scrollbar(
+            self.graph_container,
+            orient="vertical",
+            command=self.graph_canvas.yview,
+            width=18
+        )
+        self.graph_scroll_x = tk.Scrollbar(
+            self.graph_container,
+            orient="horizontal",
+            command=self.graph_canvas.xview,
+            width=18
+        )
+
+        self.graph_canvas.configure(
+            yscrollcommand=self.graph_scroll_y.set,
+            xscrollcommand=self.graph_scroll_x.set
+        )
+
+        self.graph_canvas.grid(row=0, column=0, sticky="nsew")
+        self.graph_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.graph_scroll_x.grid(row=1, column=0, sticky="ew")
+
+        self.graph_frame = tk.Frame(self.graph_canvas, bg="white")
+        self.graph_window = self.graph_canvas.create_window(
+            (0, 0),
+            window=self.graph_frame,
+            anchor="nw"
+        )
+
+        self.graph_frame.bind(
+            "<Configure>",
+            lambda e: self.graph_canvas.configure(scrollregion=self.graph_canvas.bbox("all"))
+        )
+
+        tk.Label(self.graph_frame, text="Run a query to see the plan", bg="white").pack(expand=True)
     
     def load_example(self):
 
@@ -190,7 +279,7 @@ class QueryApp:
     def refresh_graph(self):
         if self.current_plan:
             graph, _ = build_graph(self.current_plan)
-            draw_plan(self.graph_area, graph)
+            draw_plan(self.graph_frame, graph)
             self.status.config(text="Graph refreshed")
     
     def run_query(self):
@@ -214,7 +303,7 @@ class QueryApp:
             self.current_plan = result["raw_qep"]
             
             graph, _ = build_graph(result["raw_qep"])
-            draw_plan(self.graph_area, graph)
+            draw_plan(self.graph_frame, graph)
             
             self.show_annotations(result)
             
@@ -226,47 +315,53 @@ class QueryApp:
     
     def show_annotations(self, result):
         self.ann_box.delete(1.0, tk.END)
-        
-        ann = result.get("plan_annotations", {})
-        
+
+        annotated = result.get("annotated_query", {})
+        plan_ann = result.get("plan_annotations", {})
+
         output = []
         output.append("=" * 50)
-        output.append("QUERY EXECUTION SUMMARY")
+        output.append("CLAUSE-LEVEL ANNOTATIONS")
         output.append("=" * 50)
         output.append("")
-        
-        if ann.get("scans"):
-            output.append(">> HOW TABLES ARE READ:")
-            for s in ann["scans"]:
-                output.append(f"   - {s['message']}")
+
+        for item in annotated.get("from_items", []):
+            output.append(f"[FROM] {item['raw']}")
+            output.append(f"  → {item.get('annotation') or 'No annotation available.'}")
             output.append("")
-        
-        if ann.get("joins"):
-            output.append(">> HOW TABLES ARE JOINED:")
-            for j in ann["joins"]:
-                output.append(f"   - {j['message']}")
+
+        for item in annotated.get("join_conditions", []):
+            output.append(f"[JOIN] {item['raw']}")
+            output.append(f"  → {item.get('annotation') or 'No annotation available.'}")
             output.append("")
-        
-        if ann.get("join_comparisons"):
-            output.append(">> WHY THIS JOIN WAS CHOSEN:")
-            for c in ann["join_comparisons"]:
-                output.append(f"   - {c}")
+
+        for item in annotated.get("where_conditions", []):
+            output.append(f"[WHERE] {item['raw']}")
+            output.append(f"  → {item.get('annotation') or 'No annotation available.'}")
             output.append("")
-        
-        if ann.get("predicates"):
-            output.append(">> FILTER CONDITIONS:")
-            for p in ann["predicates"]:
-                output.append(f"   - {p['message']}")
+
+        for item in annotated.get("group_by_conditions", []):
+            output.append(f"[GROUP BY] {item['raw']}")
+            output.append(f"  → {item.get('annotation') or 'No annotation available.'}")
             output.append("")
-        
-        if ann.get("sorts"):
-            output.append(">> SORTING:")
-            for s in ann["sorts"]:
-                output.append(f"   - {s['message']}")
-        
-        if len(output) <= 2:
-            output.append("No annotations available for this query")
-        
+
+        for item in annotated.get("order_by_conditions", []):
+            output.append(f"[ORDER BY] {item['raw']}")
+            output.append(f"  → {item.get('annotation') or 'No annotation available.'}")
+            output.append("")
+
+        limit_clause = annotated.get("limit_clause")
+        if limit_clause:
+            output.append(f"[LIMIT] {limit_clause}")
+            output.append("")
+
+        if plan_ann.get("join_comparisons"):
+            output.append("=" * 50)
+            output.append("PLAN COMPARISON NOTES")
+            output.append("=" * 50)
+            for c in plan_ann["join_comparisons"]:
+                output.append(f"- {c}")
+
         self.ann_box.insert(1.0, "\n".join(output))
 
 
