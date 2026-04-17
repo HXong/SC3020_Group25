@@ -5,6 +5,19 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
+# Global variables for panning and zoom
+_pan_start_x = 0
+_pan_start_y = 0
+_pan_start_xlim = (0, 0)
+_pan_start_ylim = (0, 0)
+_is_panning = False
+_current_zoom = 1.0
+_current_ax = None
+_current_fig = None
+_original_xlim = None
+_original_ylim = None
+
+
 def hierarchy_pos(G, root=None, width=1.0, vert_gap=0.2, vert_loc=0):
     if root is None:
         roots = [n for n, d in G.in_degree() if d == 0]
@@ -71,41 +84,216 @@ def build_graph(plan, graph=None, parent=None, counter=0):
     return graph, next_id
 
 
-def draw_plan(frame, graph):
+def on_press(event):
+    global _pan_start_x, _pan_start_y, _pan_start_xlim, _pan_start_ylim, _is_panning
+    
+    if event.button == 1 and event.inaxes:
+        _is_panning = True
+        _pan_start_x = event.xdata
+        _pan_start_y = event.ydata
+        _pan_start_xlim = event.inaxes.get_xlim()
+        _pan_start_ylim = event.inaxes.get_ylim()
 
+
+def on_release(event):
+    global _is_panning
+    _is_panning = False
+
+
+def on_motion(event):
+    global _pan_start_x, _pan_start_y, _pan_start_xlim, _pan_start_ylim, _is_panning
+    
+    if _is_panning and event.inaxes:
+        dx = event.xdata - _pan_start_x
+        dy = event.ydata - _pan_start_y
+        
+        dx = dx / 2
+        dy = dy / 2
+        
+        new_xlim = (_pan_start_xlim[0] - dx, _pan_start_xlim[1] - dx)
+        new_ylim = (_pan_start_ylim[0] - dy, _pan_start_ylim[1] - dy)
+        
+        x_range = new_xlim[1] - new_xlim[0]
+        y_range = new_ylim[1] - new_ylim[0]
+        
+        max_pan_x = x_range * 2
+        max_pan_y = y_range * 2
+        
+        if abs(new_xlim[0]) < max_pan_x and abs(new_xlim[1]) < max_pan_x:
+            event.inaxes.set_xlim(new_xlim)
+        if abs(new_ylim[0]) < max_pan_y and abs(new_ylim[1]) < max_pan_y:
+            event.inaxes.set_ylim(new_ylim)
+        
+        event.inaxes.figure.canvas.draw_idle()
+
+
+def on_scroll(event):
+    global _current_zoom, _current_ax
+    
+    if _current_ax is None:
+        return
+    
+    # Get current mouse position in data coordinates
+    x = event.xdata
+    y = event.ydata
+    
+    if x is None or y is None:
+        # If mouse not over axes, zoom around center
+        xlim = _current_ax.get_xlim()
+        ylim = _current_ax.get_ylim()
+        x = (xlim[0] + xlim[1]) / 2
+        y = (ylim[0] + ylim[1]) / 2
+    
+    # Zoom factor
+    if event.button == 'up':
+        scale_factor = 0.8  # Zoom in
+        _current_zoom = min(_current_zoom * 1.2, 3.0)
+    elif event.button == 'down':
+        scale_factor = 1.25  # Zoom out
+        _current_zoom = max(_current_zoom / 1.2, 0.3)
+    else:
+        return
+    
+    # Get current limits
+    xlim = _current_ax.get_xlim()
+    ylim = _current_ax.get_ylim()
+    
+    # Calculate new limits centered on mouse position
+    new_width = (xlim[1] - xlim[0]) * scale_factor
+    new_height = (ylim[1] - ylim[0]) * scale_factor
+    
+    new_xlim = [x - new_width * (x - xlim[0]) / (xlim[1] - xlim[0]),
+                x + new_width * (xlim[1] - x) / (xlim[1] - xlim[0])]
+    new_ylim = [y - new_height * (y - ylim[0]) / (ylim[1] - ylim[0]),
+                y + new_height * (ylim[1] - y) / (ylim[1] - ylim[0])]
+    
+    _current_ax.set_xlim(new_xlim)
+    _current_ax.set_ylim(new_ylim)
+    _current_ax.figure.canvas.draw_idle()
+
+
+def zoom_in():
+    global _current_zoom, _current_ax
+    if _current_ax is not None:
+        _current_zoom = min(_current_zoom * 1.2, 3.0)
+        xlim = _current_ax.get_xlim()
+        ylim = _current_ax.get_ylim()
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        new_width = (xlim[1] - xlim[0]) / 1.2
+        new_height = (ylim[1] - ylim[0]) / 1.2
+        _current_ax.set_xlim([cx - new_width/2, cx + new_width/2])
+        _current_ax.set_ylim([cy - new_height/2, cy + new_height/2])
+        _current_ax.figure.canvas.draw_idle()
+
+
+def zoom_out():
+    global _current_zoom, _current_ax
+    if _current_ax is not None:
+        _current_zoom = max(_current_zoom / 1.2, 0.3)
+        xlim = _current_ax.get_xlim()
+        ylim = _current_ax.get_ylim()
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        new_width = (xlim[1] - xlim[0]) * 1.2
+        new_height = (ylim[1] - ylim[0]) * 1.2
+        _current_ax.set_xlim([cx - new_width/2, cx + new_width/2])
+        _current_ax.set_ylim([cy - new_height/2, cy + new_height/2])
+        _current_ax.figure.canvas.draw_idle()
+
+
+def reset_view():
+    global _current_zoom, _current_ax, _original_xlim, _original_ylim
+    if _current_ax is not None:
+        _current_zoom = 1.0
+        # Reset to original limits stored from the graph
+        if _original_xlim is not None and _original_ylim is not None:
+            _current_ax.set_xlim(_original_xlim)
+            _current_ax.set_ylim(_original_ylim)
+        else:
+            # Fallback: autoscale
+            _current_ax.autoscale_view()
+        _current_ax.figure.canvas.draw_idle()
+
+
+def draw_plan(frame, graph):
+    global _current_ax, _current_zoom, _current_fig, _original_xlim, _original_ylim
+    
     for widget in frame.winfo_children():
         widget.destroy()
     
     if graph.number_of_nodes() == 0:
-        tk.Label(frame, text="No plan to show").pack()
+        tk.Label(frame, text="No plan to show").pack(expand=True)
         return
-  
+    
     num_nodes = max(len(graph.nodes), 1)
-    fig_width = max(10, num_nodes * 1.2)
-    fig_height = max(6, num_nodes * 0.9)
+    
+    labels = nx.get_node_attributes(graph, "label")
+    max_label_len = max([len(str(label)) for label in labels.values()]) if labels else 20
+    
+    base_node_size = max(3000, min(8000, max_label_len * 80))
+    node_size = base_node_size
+    
+    fig_width = 14
+    fig_height = 10
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    _current_ax = ax
+    _current_fig = fig
+    _current_zoom = 1.0
 
-    labels = nx.get_node_attributes(graph, "label")
-    pos = hierarchy_pos(graph, width=max(2.5, len(graph.nodes) * 0.5))
+    pos = hierarchy_pos(graph, width=max(3.0, len(graph.nodes) * 0.6))
+
+    font_size = 12
+    
+    wrapped_labels = {}
+    for node, label in labels.items():
+        if len(label) > 30:
+            parts = label.split('\n')
+            wrapped_parts = []
+            for part in parts:
+                if len(part) > 30:
+                    wrapped_part = '\n'.join([part[i:i+30] for i in range(0, len(part), 30)])
+                    wrapped_parts.append(wrapped_part)
+                else:
+                    wrapped_parts.append(part)
+            wrapped_labels[node] = '\n'.join(wrapped_parts)
+        else:
+            wrapped_labels[node] = label
 
     nx.draw(
         graph,
         pos,
-        labels=labels,
+        labels=wrapped_labels,
         with_labels=True,
-        node_size=2800,
+        node_size=node_size,
         node_color="lightblue",
-        font_size=8,
-        ax=ax
+        font_size=font_size,
+        ax=ax,
+        font_weight='normal'
     )
 
-    ax.set_title("Query Execution Plan")
+    ax.set_title("Query Execution Plan", fontsize=14)
     ax.axis("off")
+    
+    fig.tight_layout()
+    
+    # Store original limits for reset button
+    _original_xlim = ax.get_xlim()
+    _original_ylim = ax.get_ylim()
+
+    # Bind mouse events for panning and scrolling
+    fig.canvas.mpl_connect('button_press_event', on_press)
+    fig.canvas.mpl_connect('button_release_event', on_release)
+    fig.canvas.mpl_connect('motion_notify_event', on_motion)
+    fig.canvas.mpl_connect('scroll_event', on_scroll)
 
     canvas = FigureCanvasTkAgg(fig, master=frame)
     canvas.draw()
-    canvas.get_tk_widget().pack(anchor="nw")
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+    
+    frame.canvas = canvas
+    frame.fig = fig
 
 
 class QueryApp:
@@ -116,13 +304,10 @@ class QueryApp:
         self.example_listbox = None  
         
         self.root.title("SC3020 - SQL Query Annotator")
-        self.root.geometry("1100x650")
+        self.root.geometry("1200x700")
         
         self.create_left_panel()
         self.create_right_panel()
-        
-        self.status = tk.Label(self.root, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status.pack(side=tk.BOTTOM, fill=tk.X)
     
     def create_left_panel(self):
         left = tk.Frame(self.root, padx=10, pady=10)
@@ -138,64 +323,36 @@ class QueryApp:
         tk.Button(btn_frame, text="Load Example", command=self.load_example).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="Clear", command=self.clear_all).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="Run", command=self.run_query, bg="lightgreen").pack(side=tk.LEFT, padx=2)
-        tk.Button(btn_frame, text="Refresh Graph", command=self.refresh_graph).pack(side=tk.RIGHT, padx=2)
         
         tk.Label(left, text="Annotations:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10,0))
-        self.ann_box = scrolledtext.ScrolledText(left, height=8, font=("Courier", 9))
+        self.ann_box = scrolledtext.ScrolledText(left, height=10, font=("Courier", 9))
         self.ann_box.pack(fill=tk.BOTH, expand=True, pady=5)
     
     def create_right_panel(self):
         right = tk.Frame(self.root, padx=10, pady=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        tk.Label(right, text="Query Plan Graph:", font=("Arial", 10, "bold")).pack()
+        top_frame = tk.Frame(right)
+        top_frame.pack(fill=tk.X)
+        
+        tk.Label(top_frame, text="Query Plan Graph:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        
+        # Zoom buttons
+        zoom_frame = tk.Frame(top_frame)
+        zoom_frame.pack(side=tk.RIGHT)
+        
+        tk.Button(zoom_frame, text="Zoom In (+)", command=zoom_in, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(zoom_frame, text="Zoom Out (-)", command=zoom_out, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(zoom_frame, text="Reset", command=reset_view, width=8).pack(side=tk.LEFT, padx=2)
 
-        self.graph_container = tk.Frame(right)
-        self.graph_container.pack(fill=tk.BOTH, expand=True)
-
-        self.graph_container.grid_rowconfigure(0, weight=1)
-        self.graph_container.grid_columnconfigure(0, weight=1)
-
-        self.graph_canvas = tk.Canvas(self.graph_container, highlightthickness=0, bg="white")
-
-        self.graph_scroll_y = tk.Scrollbar(
-            self.graph_container,
-            orient="vertical",
-            command=self.graph_canvas.yview,
-            width=18
-        )
-        self.graph_scroll_x = tk.Scrollbar(
-            self.graph_container,
-            orient="horizontal",
-            command=self.graph_canvas.xview,
-            width=18
-        )
-
-        self.graph_canvas.configure(
-            yscrollcommand=self.graph_scroll_y.set,
-            xscrollcommand=self.graph_scroll_x.set
-        )
-
-        self.graph_canvas.grid(row=0, column=0, sticky="nsew")
-        self.graph_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.graph_scroll_x.grid(row=1, column=0, sticky="ew")
-
-        self.graph_frame = tk.Frame(self.graph_canvas, bg="white")
-        self.graph_window = self.graph_canvas.create_window(
-            (0, 0),
-            window=self.graph_frame,
-            anchor="nw"
-        )
-
-        self.graph_frame.bind(
-            "<Configure>",
-            lambda e: self.graph_canvas.configure(scrollregion=self.graph_canvas.bbox("all"))
-        )
-
-        tk.Label(self.graph_frame, text="Run a query to see the plan", bg="white").pack(expand=True)
+        # Graph frame - fills entire remaining space
+        self.graph_frame = tk.Frame(right, bg="white")
+        self.graph_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(self.graph_frame, text="Run a query to see the plan", 
+                 bg="white", font=("Arial", 12)).pack(expand=True)
     
     def load_example(self):
-
         popup = tk.Toplevel(self.root)
         popup.title("Select Example Query")
         popup.geometry("700x500")
@@ -256,7 +413,6 @@ class QueryApp:
                 name, sql = self.examples[idx]
                 self.query_box.delete(1.0, tk.END)
                 self.query_box.insert(1.0, sql)
-                self.status.config(text=f"Loaded: {name}")
                 popup.destroy()
             else:
                 messagebox.showwarning("No Selection", "Please select an example first")
@@ -268,26 +424,18 @@ class QueryApp:
         
         tk.Button(btn_frame, text="Select", command=select_example, 
                  bg="lightgreen", width=15).pack(pady=10)
-   
-
     
     def clear_all(self):
         self.query_box.delete(1.0, tk.END)
         self.ann_box.delete(1.0, tk.END)
-        for widget in self.graph_area.winfo_children():
+        
+        for widget in self.graph_frame.winfo_children():
             widget.destroy()
-    
+        
         self.current_plan = None
-    
-        tk.Label(self.graph_area, text="Run a query to see the plan", 
-             bg="white").pack(expand=True)
-        self.status.config(text="Cleared")
-    
-    def refresh_graph(self):
-        if self.current_plan:
-            graph, _ = build_graph(self.current_plan)
-            draw_plan(self.graph_frame, graph)
-            self.status.config(text="Graph refreshed")
+        
+        tk.Label(self.graph_frame, text="Run a query to see the plan", 
+                 bg="white", font=("Arial", 12)).pack(expand=True)
     
     def run_query(self):
         query = self.query_box.get(1.0, tk.END).strip()
@@ -296,14 +444,10 @@ class QueryApp:
             messagebox.showwarning("Error", "Please enter a query")
             return
         
-        self.status.config(text="Processing...")
-        self.root.update()
-        
         try:
             result = self.process_fn(query)
             
             if not result["success"]:
-                self.status.config(text=f"Error: {result['error'][:40]}")
                 messagebox.showerror("Error", result["error"])
                 return
             
@@ -314,10 +458,7 @@ class QueryApp:
             
             self.show_annotations(result)
             
-            self.status.config(text="Done")
-            
         except Exception as e:
-            self.status.config(text=f"Error: {str(e)[:40]}")
             messagebox.showerror("Error", str(e))
     
     def show_annotations(self, result):
