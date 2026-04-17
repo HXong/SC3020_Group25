@@ -4,18 +4,10 @@ from tkinter import scrolledtext, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-
-# Global variables for panning and zoom
-_pan_start_x = 0
-_pan_start_y = 0
-_pan_start_xlim = (0, 0)
-_pan_start_ylim = (0, 0)
-_is_panning = False
-_current_zoom = 1.0
-_current_ax = None
-_current_fig = None
-_original_xlim = None
-_original_ylim = None
+# Global variables for zoom functionality
+_current_zoom = 0.9
+_current_graph = None
+_current_frame = None
 
 
 def hierarchy_pos(G, root=None, width=1.0, vert_gap=0.2, vert_loc=0):
@@ -84,140 +76,12 @@ def build_graph(plan, graph=None, parent=None, counter=0):
     return graph, next_id
 
 
-def on_press(event):
-    global _pan_start_x, _pan_start_y, _pan_start_xlim, _pan_start_ylim, _is_panning
+def draw_plan(frame, graph, zoom=0.9):
+    global _current_zoom, _current_graph, _current_frame
     
-    if event.button == 1 and event.inaxes:
-        _is_panning = True
-        _pan_start_x = event.xdata
-        _pan_start_y = event.ydata
-        _pan_start_xlim = event.inaxes.get_xlim()
-        _pan_start_ylim = event.inaxes.get_ylim()
-
-
-def on_release(event):
-    global _is_panning
-    _is_panning = False
-
-
-def on_motion(event):
-    global _pan_start_x, _pan_start_y, _pan_start_xlim, _pan_start_ylim, _is_panning
-    
-    if _is_panning and event.inaxes:
-        dx = event.xdata - _pan_start_x
-        dy = event.ydata - _pan_start_y
-        
-        dx = dx / 2
-        dy = dy / 2
-        
-        new_xlim = (_pan_start_xlim[0] - dx, _pan_start_xlim[1] - dx)
-        new_ylim = (_pan_start_ylim[0] - dy, _pan_start_ylim[1] - dy)
-        
-        x_range = new_xlim[1] - new_xlim[0]
-        y_range = new_ylim[1] - new_ylim[0]
-        
-        max_pan_x = x_range * 2
-        max_pan_y = y_range * 2
-        
-        if abs(new_xlim[0]) < max_pan_x and abs(new_xlim[1]) < max_pan_x:
-            event.inaxes.set_xlim(new_xlim)
-        if abs(new_ylim[0]) < max_pan_y and abs(new_ylim[1]) < max_pan_y:
-            event.inaxes.set_ylim(new_ylim)
-        
-        event.inaxes.figure.canvas.draw_idle()
-
-
-def on_scroll(event):
-    global _current_zoom, _current_ax
-    
-    if _current_ax is None:
-        return
-    
-    # Get current mouse position in data coordinates
-    x = event.xdata
-    y = event.ydata
-    
-    if x is None or y is None:
-        # If mouse not over axes, zoom around center
-        xlim = _current_ax.get_xlim()
-        ylim = _current_ax.get_ylim()
-        x = (xlim[0] + xlim[1]) / 2
-        y = (ylim[0] + ylim[1]) / 2
-    
-    # Zoom factor
-    if event.button == 'up':
-        scale_factor = 0.8  # Zoom in
-        _current_zoom = min(_current_zoom * 1.2, 3.0)
-    elif event.button == 'down':
-        scale_factor = 1.25  # Zoom out
-        _current_zoom = max(_current_zoom / 1.2, 0.3)
-    else:
-        return
-    
-    # Get current limits
-    xlim = _current_ax.get_xlim()
-    ylim = _current_ax.get_ylim()
-    
-    # Calculate new limits centered on mouse position
-    new_width = (xlim[1] - xlim[0]) * scale_factor
-    new_height = (ylim[1] - ylim[0]) * scale_factor
-    
-    new_xlim = [x - new_width * (x - xlim[0]) / (xlim[1] - xlim[0]),
-                x + new_width * (xlim[1] - x) / (xlim[1] - xlim[0])]
-    new_ylim = [y - new_height * (y - ylim[0]) / (ylim[1] - ylim[0]),
-                y + new_height * (ylim[1] - y) / (ylim[1] - ylim[0])]
-    
-    _current_ax.set_xlim(new_xlim)
-    _current_ax.set_ylim(new_ylim)
-    _current_ax.figure.canvas.draw_idle()
-
-
-def zoom_in():
-    global _current_zoom, _current_ax
-    if _current_ax is not None:
-        _current_zoom = min(_current_zoom * 1.2, 3.0)
-        xlim = _current_ax.get_xlim()
-        ylim = _current_ax.get_ylim()
-        cx = (xlim[0] + xlim[1]) / 2
-        cy = (ylim[0] + ylim[1]) / 2
-        new_width = (xlim[1] - xlim[0]) / 1.2
-        new_height = (ylim[1] - ylim[0]) / 1.2
-        _current_ax.set_xlim([cx - new_width/2, cx + new_width/2])
-        _current_ax.set_ylim([cy - new_height/2, cy + new_height/2])
-        _current_ax.figure.canvas.draw_idle()
-
-
-def zoom_out():
-    global _current_zoom, _current_ax
-    if _current_ax is not None:
-        _current_zoom = max(_current_zoom / 1.2, 0.3)
-        xlim = _current_ax.get_xlim()
-        ylim = _current_ax.get_ylim()
-        cx = (xlim[0] + xlim[1]) / 2
-        cy = (ylim[0] + ylim[1]) / 2
-        new_width = (xlim[1] - xlim[0]) * 1.2
-        new_height = (ylim[1] - ylim[0]) * 1.2
-        _current_ax.set_xlim([cx - new_width/2, cx + new_width/2])
-        _current_ax.set_ylim([cy - new_height/2, cy + new_height/2])
-        _current_ax.figure.canvas.draw_idle()
-
-
-def reset_view():
-    global _current_zoom, _current_ax, _original_xlim, _original_ylim
-    if _current_ax is not None:
-        _current_zoom = 1.0
-        # Reset to original limits stored from the graph
-        if _original_xlim is not None and _original_ylim is not None:
-            _current_ax.set_xlim(_original_xlim)
-            _current_ax.set_ylim(_original_ylim)
-        else:
-            # Fallback: autoscale
-            _current_ax.autoscale_view()
-        _current_ax.figure.canvas.draw_idle()
-
-
-def draw_plan(frame, graph):
-    global _current_ax, _current_zoom, _current_fig, _original_xlim, _original_ylim
+    _current_graph = graph
+    _current_frame = frame
+    _current_zoom = zoom
     
     for widget in frame.winfo_children():
         widget.destroy()
@@ -232,19 +96,17 @@ def draw_plan(frame, graph):
     max_label_len = max([len(str(label)) for label in labels.values()]) if labels else 20
     
     base_node_size = max(3000, min(8000, max_label_len * 80))
-    node_size = base_node_size
+    node_size = int(base_node_size * zoom)
     
+    # Fixed figure size that fills the frame
     fig_width = 14
     fig_height = 10
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    _current_ax = ax
-    _current_fig = fig
-    _current_zoom = 1.0
 
     pos = hierarchy_pos(graph, width=max(3.0, len(graph.nodes) * 0.6))
 
-    font_size = 12
+    font_size = max(6, min(12, int(9 * zoom)))
     
     wrapped_labels = {}
     for node, label in labels.items():
@@ -273,20 +135,11 @@ def draw_plan(frame, graph):
         font_weight='normal'
     )
 
-    ax.set_title("Query Execution Plan", fontsize=14)
+    ax.set_title("Query Execution Plan")
     ax.axis("off")
     
+    # Adjust layout to fill the space
     fig.tight_layout()
-    
-    # Store original limits for reset button
-    _original_xlim = ax.get_xlim()
-    _original_ylim = ax.get_ylim()
-
-    # Bind mouse events for panning and scrolling
-    fig.canvas.mpl_connect('button_press_event', on_press)
-    fig.canvas.mpl_connect('button_release_event', on_release)
-    fig.canvas.mpl_connect('motion_notify_event', on_motion)
-    fig.canvas.mpl_connect('scroll_event', on_scroll)
 
     canvas = FigureCanvasTkAgg(fig, master=frame)
     canvas.draw()
@@ -294,6 +147,27 @@ def draw_plan(frame, graph):
     
     frame.canvas = canvas
     frame.fig = fig
+
+
+def zoom_in():
+    global _current_zoom, _current_graph, _current_frame
+    if _current_graph is not None:
+        _current_zoom = min(_current_zoom * 1.2, 3.0)
+        draw_plan(_current_frame, _current_graph, _current_zoom)
+
+
+def zoom_out():
+    global _current_zoom, _current_graph, _current_frame
+    if _current_graph is not None:
+        _current_zoom = max(_current_zoom / 1.2, 0.9)
+        draw_plan(_current_frame, _current_graph, _current_zoom)
+
+
+def reset_zoom():
+    global _current_zoom, _current_graph, _current_frame
+    if _current_graph is not None:
+        _current_zoom = 0.9
+        draw_plan(_current_frame, _current_graph, _current_zoom)
 
 
 class QueryApp:
@@ -337,13 +211,12 @@ class QueryApp:
         
         tk.Label(top_frame, text="Query Plan Graph:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         
-        # Zoom buttons
         zoom_frame = tk.Frame(top_frame)
         zoom_frame.pack(side=tk.RIGHT)
         
         tk.Button(zoom_frame, text="Zoom In (+)", command=zoom_in, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(zoom_frame, text="Zoom Out (-)", command=zoom_out, width=10).pack(side=tk.LEFT, padx=2)
-        tk.Button(zoom_frame, text="Reset", command=reset_view, width=8).pack(side=tk.LEFT, padx=2)
+        tk.Button(zoom_frame, text="Reset", command=reset_zoom, width=8).pack(side=tk.LEFT, padx=2)
 
         # Graph frame - fills entire remaining space
         self.graph_frame = tk.Frame(right, bg="white")
@@ -454,7 +327,7 @@ class QueryApp:
             self.current_plan = result["raw_qep"]
             
             graph, _ = build_graph(result["raw_qep"])
-            draw_plan(self.graph_frame, graph)
+            draw_plan(self.graph_frame, graph, 0.9)
             
             self.show_annotations(result)
             
