@@ -671,14 +671,9 @@ def is_order_satisfied_by_index(
     if not order_by_conditions:
         return False
 
-    order_cols = [extract_order_by_column(item["raw"]) for item in order_by_conditions]
-
     for op in operators:
-        if op.get("node_type") == "Index Scan":
-            index_cond = op.get("index_cond")
-            index_col = extract_column_from_index_cond(index_cond)
-
-            if index_col and index_col in order_cols:
+        if op.get("node_type") == "Index Scan" and op.get("index_name"):
+            if op["index_name"].lower().endswith("_pkey"):
                 return True
 
     return False
