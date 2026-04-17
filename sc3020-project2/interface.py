@@ -185,6 +185,13 @@ class QueryApp:
     def clear_all(self):
         self.query_box.delete(1.0, tk.END)
         self.ann_box.delete(1.0, tk.END)
+        for widget in self.graph_area.winfo_children():
+            widget.destroy()
+    
+        self.current_plan = None
+    
+        tk.Label(self.graph_area, text="Run a query to see the plan", 
+             bg="white").pack(expand=True)
         self.status.config(text="Cleared")
     
     def refresh_graph(self):
