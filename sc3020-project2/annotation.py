@@ -675,11 +675,15 @@ def is_order_satisfied_by_index(
 
     for op in operators:
         if op.get("node_type") == "Index Scan":
-            index_cond = op.get("index_cond")
-            index_col = extract_column_from_index_cond(index_cond)
+            index_name = op.get("index_name")
 
-            if index_col and index_col in order_cols:
-                return True
+            if not index_name:
+                continue
+
+            # check if ORDER BY column is part of index name
+            for col in order_cols:
+                if col in index_name.lower():
+                    return True
 
     return False
 
