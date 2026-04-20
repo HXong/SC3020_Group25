@@ -11,13 +11,13 @@ For Development, this project will be done on `project2-main`. For local branche
 
 ## Group Members
 
-| Name | Tasks |
-|------|---------------|
-| Ong Hong Xun |  |
-| Clarence Tan Yan Kai |  |
-| Wong Rong Jing |  |
-| Chen ZhongJiang |  |
-| Chan Zi Jian |  |
+| Name |
+|------|
+| Ong Hong Xun |
+| Clarence Tan Yan Kai |
+| Wong Rong Jing |
+| Chen ZhongJiang |
+| Chan Zi Jian |
 
 ---
 
